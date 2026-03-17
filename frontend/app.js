@@ -86,11 +86,30 @@ function setupEventListeners() {
     document.getElementById('btn-start').addEventListener('click', () => sendControlCommand('start'));
     document.getElementById('btn-stop').addEventListener('click', () => sendControlCommand('stop'));
     
-    // Sliders
+    // Sliders — sync label text AND CSS gradient fill
     const durSlider = document.getElementById('attack-dur');
     const intSlider = document.getElementById('attack-int');
-    durSlider.addEventListener('input', (e) => document.getElementById('dur-val').textContent = e.target.value + 's');
-    intSlider.addEventListener('input', (e) => document.getElementById('int-val').textContent = e.target.value + '%');
+
+    function updateSlider(slider) {
+        const min = parseFloat(slider.min) || 0;
+        const max = parseFloat(slider.max) || 100;
+        const val = ((parseFloat(slider.value) - min) / (max - min)) * 100;
+        slider.style.setProperty('--val', val + '%');
+    }
+
+    durSlider.addEventListener('input', (e) => {
+        document.getElementById('dur-val').textContent = e.target.value + 's';
+        updateSlider(e.target);
+    });
+    intSlider.addEventListener('input', (e) => {
+        document.getElementById('int-val').textContent = e.target.value + '%';
+        updateSlider(e.target);
+    });
+
+    // Initialize gradient fill on page load
+    updateSlider(durSlider);
+    updateSlider(intSlider);
+
     
     // Inject
     document.getElementById('btn-inject').addEventListener('click', injectAttack);
