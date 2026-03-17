@@ -53,14 +53,18 @@
             
             <div class="form-row">
                 <div class="form-group half">
-                    <label>Duration (s)</label>
+                    <div class="slider-header">
+                        <label>Duration</label>
+                        <span id="dur-val" class="slider-val">8s</span>
+                    </div>
                     <input type="range" id="attack-dur" min="2" max="30" value="8" class="glass-slider">
-                    <span id="dur-val" class="slider-val">8s</span>
                 </div>
                 <div class="form-group half">
-                    <label>Intensity</label>
+                    <div class="slider-header">
+                        <label>Intensity</label>
+                        <span id="int-val" class="slider-val">50%</span>
+                    </div>
                     <input type="range" id="attack-int" min="1" max="100" value="50" class="glass-slider">
-                    <span id="int-val" class="slider-val">50%</span>
                 </div>
             </div>
             

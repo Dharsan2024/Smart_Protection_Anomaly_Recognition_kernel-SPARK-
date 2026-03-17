@@ -87,28 +87,30 @@ function setupEventListeners() {
     document.getElementById('btn-stop').addEventListener('click', () => sendControlCommand('stop'));
     
     // Sliders — sync label text AND CSS gradient fill
-    const durSlider = document.getElementById('attack-dur');
-    const intSlider = document.getElementById('attack-int');
-
-    function updateSlider(slider) {
+    function updateSliderFill(slider) {
         const min = parseFloat(slider.min) || 0;
         const max = parseFloat(slider.max) || 100;
         const val = ((parseFloat(slider.value) - min) / (max - min)) * 100;
         slider.style.setProperty('--val', val + '%');
     }
 
-    durSlider.addEventListener('input', (e) => {
-        document.getElementById('dur-val').textContent = e.target.value + 's';
-        updateSlider(e.target);
-    });
-    intSlider.addEventListener('input', (e) => {
-        document.getElementById('int-val').textContent = e.target.value + '%';
-        updateSlider(e.target);
-    });
+    const sliders = [
+        { id: 'attack-dur', valId: 'dur-val', unit: 's' },
+        { id: 'attack-int', valId: 'int-val', unit: '%' }
+    ];
 
-    // Initialize gradient fill on page load
-    updateSlider(durSlider);
-    updateSlider(intSlider);
+    sliders.forEach(s => {
+        const el = document.getElementById(s.id);
+        const valEl = document.getElementById(s.valId);
+        if (el && valEl) {
+            el.addEventListener('input', (e) => {
+                valEl.textContent = e.target.value + s.unit;
+                updateSliderFill(e.target);
+            });
+            // Initial fill
+            updateSliderFill(el);
+        }
+    });
 
     
     // Inject
