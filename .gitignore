@@ -1,0 +1,26 @@
+# Secrets
+.env
+
+# Large datasets (regenerate with data/generate_dataset.py)
+data/*.csv
+data/*.txt
+KAGGLE DATASET AND MODELS/
+
+# Trained models (regenerate with models/train_models.py)
+models/saved/*.joblib
+models/saved/*.pkl
+models/saved/*.h5
+models/saved/*.keras
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / System
+.gemini/
+.agents/
+.vscode/
+node_modules/
+dist/
+build/
