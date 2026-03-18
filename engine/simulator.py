@@ -84,6 +84,7 @@ class CANBusSimulator:
         # Attack state
         self.attack_active = False
         self.attack_type: Optional[str] = None
+        self.attacker_quarantined = False
 
         # Load dataset
         self.dataset: Optional[pd.DataFrame] = None
@@ -167,6 +168,9 @@ class CANBusSimulator:
         """Push a message to the buffer and update stats."""
         # KILL SWITCH: Drop if quarantined
         if msg.can_id_hex in self.quarantined_ids:
+            return
+        # PORT ISOLATION: Drop if attacker is physically quarantined at the gateway
+        if getattr(self, 'attacker_quarantined', False) and msg.source == "ATTACKER":
             return
             
         with self._lock:
@@ -264,6 +268,7 @@ class CANBusSimulator:
 
             self.attack_active = False
             self.attack_type = None
+            self.attacker_quarantined = False  # Reset for next attack cycle
             logger.info(f"{attack_type} attack completed.")
 
         self._attack_thread = threading.Thread(target=_run_attack, daemon=True)
@@ -274,9 +279,15 @@ class CANBusSimulator:
         self.quarantined_ids.add(can_id_hex)
         logger.warning(f"KILL SWITCH ACTIVATED: CAN ID {can_id_hex} is now quarantined.")
         
+    def quarantine_attacker_port(self) -> None:
+        """Physically isolates the attacking module entirely."""
+        self.attacker_quarantined = True
+        logger.warning("AUTO-IPS ACTIVATED: Full attacker port isolation enforced.")
+        
     def clear_quarantine(self) -> None:
         """Restores full flow"""
         self.quarantined_ids.clear()
+        self.attacker_quarantined = False
 
     def get_recent_messages(self, count: int = 100) -> List[Dict]:
         """Get the most recent messages from the buffer."""

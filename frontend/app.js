@@ -85,6 +85,7 @@ function setupEventListeners() {
     // Controls
     document.getElementById('btn-start').addEventListener('click', () => sendControlCommand('start'));
     document.getElementById('btn-stop').addEventListener('click', () => sendControlCommand('stop'));
+    document.getElementById('btn-reset').addEventListener('click', () => sendControlCommand('reset'));
     
     // Sliders — sync label text AND CSS gradient fill
     function updateSliderFill(slider) {
@@ -112,21 +113,74 @@ function setupEventListeners() {
         }
     });
 
-    
+    // Fallback wrapper for safe listener attachment
+    const addListenerIfExist = (id, event, callback) => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener(event, callback);
+    };
+
     // Inject
-    document.getElementById('btn-inject').addEventListener('click', injectAttack);
+    addListenerIfExist('btn-inject', 'click', injectAttack);
     
     // Kill Switch
-    document.getElementById('btn-kill-switch').addEventListener('click', activateKillSwitch);
+    addListenerIfExist('btn-kill-switch', 'click', activateKillSwitch);
     
     // PDF Export
-    document.getElementById('btn-export-pdf').addEventListener('click', exportIncidentReport);
+    addListenerIfExist('btn-export-pdf', 'click', exportIncidentReport);
+
+    // Auto-IPS Toggle
+    addListenerIfExist('btn-auto-ips', 'click', toggleAutoIPS);
 
     // Audit Modal
-    document.getElementById('btn-audit').addEventListener('click', runSystemAudit);
-    document.getElementById('btn-close-modal').addEventListener('click', () => {
+    addListenerIfExist('btn-audit', 'click', runSystemAudit);
+    // AI Analyst Manual Trigger
+    addListenerIfExist('btn-analyze-threat', 'click', analyzeLatestThreat);
+
+    addListenerIfExist('btn-close-modal', 'click', () => {
         document.getElementById('audit-modal').style.display = 'none';
     });
+}
+
+// ═══════════════════════════════════════════════════════
+// AUTONOMOUS IPS LOGIC
+// ═══════════════════════════════════════════════════════
+let autoIPSEnabled = false;
+
+async function toggleAutoIPS() {
+    autoIPSEnabled = !autoIPSEnabled;
+    const btn = document.getElementById('btn-auto-ips');
+    
+    // Optimistic UI Update
+    if (autoIPSEnabled) {
+        btn.innerHTML = '<span class="ips-icon">🤖</span> AUTO-IPS: ACTIVE';
+        btn.classList.remove('ips-inactive');
+        btn.classList.add('ips-active');
+    } else {
+        btn.innerHTML = '<span class="ips-icon">🤖</span> AUTO-IPS: OFFLINE';
+        btn.classList.remove('ips-active');
+        btn.classList.add('ips-inactive');
+    }
+    
+    try {
+        await fetch(`${API_BASE}/control/auto-ips`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: autoIPSEnabled })
+        });
+    } catch (e) {
+        console.error(`Failed to toggle Auto-IPS:`, e);
+        // Revert UI on failure
+        autoIPSEnabled = !autoIPSEnabled;
+        if (!autoIPSEnabled) { // meaning it failed to turn ON
+            btn.innerHTML = '<span class="ips-icon">🤖</span> AUTO-IPS: OFFLINE';
+            btn.classList.remove('ips-active');
+            btn.classList.add('ips-inactive');
+        } else {
+            btn.innerHTML = '<span class="ips-icon">🤖</span> AUTO-IPS: ACTIVE';
+            btn.classList.remove('ips-inactive');
+            btn.classList.add('ips-active');
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -161,9 +215,11 @@ function handleStreamData(payload) {
             updateModelStatus('xgb', data.models_loaded.xgb);
             updateModelStatus('rf', data.models_loaded.rf);
             updateModelStatus('iso', data.models_loaded.iso);
+            updateModelStatus('lstm', data.models_loaded.lstm);
         }
     } 
     else if (type === 'metrics') {
+        console.log("Metrics received:", data);
         updateKPIs(data.stats, data.threats);
         updateDonutChart(data.threats.counts);
     } 
@@ -176,11 +232,20 @@ function handleStreamData(payload) {
         // Don't render metrics for this message if it's already from an isolated ID
         if (isolatedIds.has(data.can_id_hex)) return;
         
+        if (data.auto_mitigated) {
+            triggerGlobalAlert('protected');
+            appendThreatFeed(data); 
+            // We DO want to chart the packet to visualize the blocked attack, but NOT trigger 'compromised'
+            updateTimelineData(data);
+            return;
+        }
+
         appendThreatFeed(data);
         updateTimelineData(data);
         
         if (cls !== 'Normal') {
-            triggerGlobalAlert(true);
+            triggerGlobalAlert('compromised');
+            document.getElementById('btn-analyze-threat').style.display = 'inline-block';
         }
     }
     else if (type === 'ai_insight_loading') {
@@ -192,12 +257,63 @@ function handleStreamData(payload) {
         activeGeminiContent = data.content;
         renderAIGemini(data.classification, data.content);
         document.getElementById('btn-export-pdf').style.display = 'inline-block';
+        document.getElementById('btn-analyze-threat').style.display = 'none';
+    }
+    else if (type === 'system_reset') {
+        // Clear all arrays
+        historyData.labels = [];
+        historyData.normal = [];
+        historyData.dos = [];
+        historyData.fuzzy = [];
+        historyData.spoofing = [];
+        historyData.replay = [];
+        currentCounts = { normal: 0, dos: 0, fuzzy: 0, spoofing: 0, replay: 0 };
+        currentSecond = Math.floor(Date.now() / 1000);
+        
+        donutChart.updateSeries([0, 0, 0, 0, 0]);
+        
+        document.getElementById('threat-feed').innerHTML = '<div class="feed-empty">Awaiting incoming CAN bus traffic...</div>';
+        document.getElementById('kpi-pps').textContent = '0';
+        document.getElementById('kpi-total').textContent = '0';
+        document.getElementById('kpi-threats').textContent = '0';
+        document.getElementById('kpi-ratio').textContent = '0.0%';
+        resetAIAnalyst();
+        
+        // Reset Time
+        document.getElementById('uptime-clock').textContent = "00:00:00";
+        startTime = Date.now();
     }
     else if (type === 'quarantine_update') {
         if (data.action === 'isolated') {
             isolatedIds.add(data.can_id_hex);
-            console.log("Isolated ECU ID:", data.can_id_hex);
-            document.getElementById('kill-switch-container').style.display = 'none';
+            console.log("Isolated entity:", data.can_id_hex);
+            
+            // Hide the manual kill switch
+            const ks = document.getElementById('kill-switch-container');
+            if(ks) ks.style.display = 'none';
+            // Also hide the analyze button if an action was just taken
+            const btnAnalyze = document.getElementById('btn-analyze-threat');
+            if (btnAnalyze) btnAnalyze.style.display = 'none';
+            
+            // If this was an autonomous action, inject a prominent alert into the feed
+            if (data.auto) {
+                const feed = document.getElementById('threat-feed');
+                const alertHtml = `
+                    <div class="threat-item glass-panel" style="border-left: 4px solid var(--accent-cyan); background: rgba(56, 189, 248, 0.1);">
+                        <div class="threat-header">
+                            <span class="threat-title" style="color: var(--accent-cyan);">⚡ AUTO-MITIGATION ENFORCED</span>
+                            <span class="threat-time">${new Date().toISOString().split('T')[1].slice(0,-1)}</span>
+                        </div>
+                        <div class="threat-details">
+                            Intrusion attempt blocked. The compromised physical ECU port has been perfectly isolated from the network.
+                        </div>
+                    </div>
+                `;
+                feed.insertAdjacentHTML('afterbegin', alertHtml);
+                
+                // Keep feed scrollable but trim old items
+                if (feed.children.length > 50) feed.lastElementChild.remove();
+            }
         } else {
             isolatedIds.clear();
         }
@@ -245,6 +361,26 @@ async function injectAttack() {
         console.error("Injection failed:", e);
         btn.textContent = "🚀 LAUNCH ATTACK";
         btn.disabled = false;
+    }
+}
+
+async function analyzeLatestThreat() {
+    const btn = document.getElementById('btn-analyze-threat');
+    btn.disabled = true;
+    btn.textContent = "🛰️ ANALYZING...";
+    
+    try {
+        const resp = await fetch(`${API_BASE}/gemini/analyze`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.status === 'error') {
+            alert(data.message);
+            btn.disabled = false;
+            btn.textContent = "🛰️ ANALYZE THREAT";
+        }
+    } catch (e) {
+        console.error("AI Analysis failed:", e);
+        btn.disabled = false;
+        btn.textContent = "🛰️ ANALYZE THREAT";
     }
 }
 
@@ -311,24 +447,46 @@ function updateModelStatus(id, active) {
     el.textContent = active ? 'ACTIVE' : 'OFFLINE';
 }
 
-function triggerGlobalAlert(isThreat) {
+function triggerGlobalAlert(stateType) {
     const display = document.getElementById('global-threat-display');
+    if (!display) return;
     const val = display.querySelector('.threat-value');
     
-    if (isThreat) {
+    // Clear any existing reset timeout
+    if (window.alertTimeout) clearTimeout(window.alertTimeout);
+
+    if (stateType === 'compromised') {
         val.textContent = "COMPROMISED";
         val.className = "threat-value danger";
-        document.getElementById('kill-switch-container').style.display = 'block';
+        val.style.textShadow = "none";
+        val.style.color = "";
         
-        // Remove alert styling after 5 seconds of peace
-        clearTimeout(window.alertTimeout);
+        const ks = document.getElementById('kill-switch-container');
+        if (ks) ks.style.display = 'block';
+        
         window.alertTimeout = setTimeout(() => {
             val.textContent = "SECURE";
             val.className = "threat-value safe";
-            document.getElementById('kill-switch-container').style.display = 'none';
-            document.getElementById('btn-export-pdf').style.display = 'none';
+            if (ks) ks.style.display = 'none';
+            const exp = document.getElementById('btn-export-pdf');
+            if (exp) exp.style.display = 'none';
             resetAIAnalyst();
         }, 5000);
+    } else if (stateType === 'protected') {
+        val.textContent = "SECURE (PROTECTED)";
+        val.className = "threat-value safe";
+        val.style.textShadow = "0 0 10px rgba(56, 189, 248, 0.8)";
+        val.style.color = "var(--accent-cyan)";
+        
+        const ks = document.getElementById('kill-switch-container');
+        if (ks) ks.style.display = 'none';
+        
+        window.alertTimeout = setTimeout(() => {
+            val.textContent = "SECURE";
+            val.className = "threat-value safe";
+            val.style.textShadow = "none";
+            val.style.color = "";
+        }, 3000);
     }
 }
 
@@ -340,7 +498,11 @@ function updateKPIs(stats, threats) {
     document.getElementById('kpi-total').textContent = t_str;
     
     document.getElementById('kpi-threats').textContent = threats.total_threats.toLocaleString();
-    document.getElementById('kpi-ratio').textContent = (threats.threat_ratio * 100).toFixed(1) + '%';
+    
+    // Live Threats: Sum of non-normal counts in the current second
+    const liveThreats = (currentCounts.dos || 0) + (currentCounts.fuzzy || 0) + 
+                        (currentCounts.spoofing || 0) + (currentCounts.replay || 0);
+    document.getElementById('kpi-live-threats').textContent = liveThreats.toLocaleString();
     
     // Alert styling applied if threats exist
     const threatCard = document.getElementById('card-threats');
@@ -368,7 +530,7 @@ function initCharts() {
     const lineOpts = {
         ...commonOpts,
         chart: { ...commonOpts.chart, type: 'area', height: 280, stacked: false },
-        colors: ['#10B981', '#DC2626', '#F97316', '#EF4444', '#F59E0B'],
+        colors: ['#10B981', '#ef233c', '#8b5cf6', '#eab308', '#06b6d4'],
         dataLabels: { enabled: false },
         stroke: { curve: 'smooth', width: [2, 3, 3, 3, 3] },
         fill: { type: 'gradient', gradient: { shadeIntensity: 1, opacityFrom: 0.4, opacityTo: 0.05 } },
@@ -390,7 +552,7 @@ function initCharts() {
     const donutOpts = {
         ...commonOpts,
         chart: { ...commonOpts.chart, type: 'donut', height: 280 },
-        colors: ['#10B981', '#DC2626', '#F97316', '#EF4444', '#F59E0B'],
+        colors: ['#10B981', '#ef233c', '#8b5cf6', '#eab308', '#06b6d4'],
         series: [0, 0, 0, 0, 0],
         labels: ['Normal', 'DoS', 'Fuzzy', 'Spoofing', 'Replay'],
         dataLabels: { enabled: false },
@@ -404,6 +566,30 @@ function initCharts() {
     // Periodic Chart Updater Loop
     setInterval(() => {
         if (!isRunning) return;
+        
+        // Push finished second into history
+        const now = Math.floor(Date.now() / 1000);
+        if (now > currentSecond) {
+            historyData.labels.push(new Date(currentSecond*1000).toLocaleTimeString());
+            historyData.normal.push(currentCounts.normal);
+            historyData.dos.push(currentCounts.dos);
+            historyData.fuzzy.push(currentCounts.fuzzy);
+            historyData.spoofing.push(currentCounts.spoofing);
+            historyData.replay.push(currentCounts.replay);
+            
+            if (historyData.labels.length > MAX_DATAPOINTS) {
+                historyData.labels.shift();
+                historyData.normal.shift();
+                historyData.dos.shift();
+                historyData.fuzzy.shift();
+                historyData.spoofing.shift();
+                historyData.replay.shift();
+            }
+            
+            currentSecond = now;
+            currentCounts = { normal: 0, dos: 0, fuzzy: 0, spoofing: 0, replay: 0 };
+        }
+
         timelineChart.updateSeries([
             { data: historyData.normal },
             { data: historyData.dos },
@@ -419,30 +605,6 @@ let currentSecond = Math.floor(Date.now() / 1000);
 let currentCounts = { normal: 0, dos: 0, fuzzy: 0, spoofing: 0, replay: 0 };
 
 function updateTimelineData(verdict) {
-    const now = Math.floor(Date.now() / 1000);
-    
-    if (now > currentSecond) {
-        // Push finished second into history
-        historyData.labels.push(new Date(currentSecond*1000).toLocaleTimeString());
-        historyData.normal.push(currentCounts.normal);
-        historyData.dos.push(currentCounts.dos);
-        historyData.fuzzy.push(currentCounts.fuzzy);
-        historyData.spoofing.push(currentCounts.spoofing);
-        historyData.replay.push(currentCounts.replay);
-        
-        if (historyData.labels.length > MAX_DATAPOINTS) {
-            historyData.labels.shift();
-            historyData.normal.shift();
-            historyData.dos.shift();
-            historyData.fuzzy.shift();
-            historyData.spoofing.shift();
-            historyData.replay.shift();
-        }
-        
-        currentSecond = now;
-        currentCounts = { normal: 0, dos: 0, fuzzy: 0, spoofing: 0, replay: 0 };
-    }
-    
     const c = verdict.classification.toLowerCase();
     if (currentCounts[c] !== undefined) currentCounts[c]++;
 }
@@ -575,7 +737,7 @@ async function runSystemAudit() {
     result.innerHTML = '<div class="loading-spinner"></div><p>Gemini is auditing system telemetry and ECU behavior patterns...</p>';
     
     try {
-        const resp = await fetch(`${API_BASE}/gemini/fsl-audit`);
+        const resp = await fetch(`${API_BASE}/gemini/forensics`, { method: 'POST' });
         const data = await resp.json();
         
         if (data.audit) {

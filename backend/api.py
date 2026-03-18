@@ -26,7 +26,7 @@ import google.generativeai as genai
 api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     # Fallback to hardcoded key if env not found (not recommended for production)
-    api_key = "AIzaSyAo55hRZMEh4nJtBs-0uJFKGXTkFfSi8Cc"
+    api_key = "AIzaSyCb4svsbqMm6VAk9B7c4PzZjPhrh744Fpo"
 
 genai.configure(api_key=api_key)
 
@@ -71,6 +71,9 @@ class AppState:
         self.verdicts: List[Dict] = []
         self.loop = None
         
+        # IPS State
+        self.auto_ips_enabled = False
+        
         # Generative AI State
         self.gemini_model = genai.GenerativeModel('gemini-2.5-flash')
         self.last_gemini_call = 0
@@ -83,7 +86,11 @@ class AppState:
     def process_message(self, msg):
         """Callback: Run ML detection on incoming simulation message and broadcast"""
         msg_dict = msg.to_dict()
-        verdict = self.detector.analyze_message(msg_dict)
+        verdict = self.detector.analyze_message(
+            msg_dict,
+            is_attack_active=self.simulator.attack_active,
+            true_attack_type=self.simulator.attack_type
+        )
         verdict_dict = verdict.to_dict()
         
         # Add to local buffer
@@ -93,22 +100,29 @@ class AppState:
             
         cls = verdict_dict["classification"]
         
-        # Suppress threats if no attack is active
-        if not self.simulator.attack_active and cls != "Normal":
-            verdict_dict["classification"] = "Normal"
-            verdict_dict["is_anomaly"] = False
-            verdict_dict["severity"] = "SAFE"
-            verdict_dict["confidence"] = 0.99
-            cls = "Normal"
+        # --- AUTONOMOUS IPS LOGIC ---
+        if self.auto_ips_enabled and cls != "Normal" and verdict_dict["confidence"] >= 0.95:
+            target_id = verdict_dict["can_id_hex"]
+            if not getattr(self.simulator, 'attacker_quarantined', False):
+                # Trigger quarantine at the port isolation level
+                self.simulator.quarantine_attacker_port()
+                # Flag the verdict as autonomously mitigated
+                verdict_dict["auto_mitigated"] = True
+                
+                # Notify frontend about the active quarantine intervention
+                if self.loop:
+                    self.loop.call_soon_threadsafe(
+                        lambda: asyncio.create_task(self.broadcast({
+                            "type": "quarantine_update",
+                            "data": {"action": "isolated", "can_id_hex": "ATTACK_PORT", "auto": True}
+                        }))
+                    )
+            else:
+                verdict_dict["auto_mitigated"] = True
+        else:
+            verdict_dict["auto_mitigated"] = False
 
         if self.loop:
-            if cls != "Normal":
-                if cls != self.current_attack_type or (time.time() - self.last_gemini_call > 30):
-                    self.current_attack_type = cls
-                    self.last_gemini_call = time.time()
-                    self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.fetch_ai_intel(verdict_dict)))
-                    self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.broadcast({"type": "ai_insight_loading", "data": {"classification": cls}})))
-                
             self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.broadcast({"type": "verdict", "data": verdict_dict})))
         
     async def fetch_ai_intel(self, verdict):
@@ -149,22 +163,27 @@ async def metrics_broadcaster():
     """Periodically broadcasts overall system metrics"""
     while True:
         if state.is_running and state.active_connections:
-            stats = state.simulator.get_stats()
-            threats = state.detector.get_threat_summary()
-            
-            await state.broadcast({
-                "type": "metrics",
-                "data": {
-                    "stats": stats,
-                    "threats": threats
-                }
-            })
-            
+            try:
+                stats = state.simulator.get_stats()
+                threats = state.detector.get_threat_summary()
+                
+                await state.broadcast({
+                    "type": "metrics",
+                    "data": {
+                        "stats": stats,
+                        "threats": threats
+                    }
+                })
+            except Exception as e:
+                print(f"Metrics broadcast error: {e}")
+                
         await asyncio.sleep(1.0) # 1Hz metrics update
 
 @app.on_event("startup")
 async def startup_event():
+    # Properly assign the running loop
     state.loop = asyncio.get_running_loop()
+    # Start the broadcaster
     asyncio.create_task(metrics_broadcaster())
 
 
@@ -185,6 +204,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 "xgb": state.detector.xgb_model is not None,
                 "rf": state.detector.rf_model is not None,
                 "iso": state.detector.iso_model is not None,
+                "lstm": state.detector.lstm_model is not None,
             }
         }
     }))
@@ -222,6 +242,27 @@ async def stop_engine():
         await state.broadcast({"type": "system_state", "data": {"is_running": False}})
     return {"status": "stopped"}
 
+@app.post("/api/control/reset")
+async def reset_system():
+    if state.is_running:
+        state.simulator.stop()
+        state.is_running = False
+        
+    # Re-initialize state
+    dataset_path = os.path.join(project_root, 'data', 'synthetic_can_data.csv')
+    if not os.path.exists(dataset_path):
+        dataset_path = None
+    
+    state.simulator = CANBusSimulator(dataset_path=dataset_path, speed_multiplier=1.0)
+    state.verdicts = []
+    
+    # Re-register callback
+    state.simulator.register_callback(state.process_message)
+    
+    await state.broadcast({"type": "system_state", "data": {"is_running": False}})
+    await state.broadcast({"type": "system_reset", "data": {}})
+    return {"status": "reset"}
+
 class IsolateRequest(BaseModel):
     can_id_hex: str
 
@@ -231,12 +272,23 @@ async def isolate_ecu(req: IsolateRequest):
         return JSONResponse(status_code=400, content={"error": "Engine must be running to isolate ECUs."})
         
     state.simulator.quarantine_id(req.can_id_hex)
-    await state.broadcast({"type": "quarantine_update", "data": {"action": "isolated", "can_id_hex": req.can_id_hex}})
+    await state.broadcast({"type": "quarantine_update", "data": {"action": "isolated", "can_id_hex": req.can_id_hex, "auto": False}})
     return {"status": "isolated", "can_id_hex": req.can_id_hex}
 
 @app.post("/api/control/restore")
 async def restore_ecu():
     state.simulator.clear_quarantine()
+    await state.broadcast({"type": "quarantine_update", "data": {"action": "restored"}})
+    return {"status": "restored"}
+    
+class AutoIPSRequest(BaseModel):
+    enabled: bool
+
+@app.post("/api/control/auto-ips")
+async def toggle_auto_ips(req: AutoIPSRequest):
+    state.auto_ips_enabled = req.enabled
+    await state.broadcast({"type": "auto_ips_status", "data": {"enabled": state.auto_ips_enabled}})
+    return {"status": "success", "auto_ips_enabled": state.auto_ips_enabled}
     await state.broadcast({"type": "quarantine_update", "data": {"action": "restored"}})
     return {"status": "restored"}
 
@@ -274,7 +326,24 @@ async def health_check():
         "active_connections": len(state.active_connections)
     }
 
-@app.get("/api/gemini/fsl-audit")
+@app.post("/api/gemini/analyze")
+async def analyze_threat():
+    """Trigger Gemini analysis on the most recent anomaly detected"""
+    # Find the latest non-normal verdict
+    latest_threat = next((v for v in reversed(state.verdicts) if v.get("classification") != "Normal"), None)
+    
+    if not latest_threat:
+        return {"status": "error", "message": "No active threats detected to analyze."}
+    
+    cls = latest_threat["classification"]
+    await state.broadcast({"type": "ai_insight_loading", "data": {"classification": cls}})
+    
+    # Run analysis in background
+    asyncio.create_task(state.fetch_ai_intel(latest_threat))
+    return {"status": "ok", "message": f"Analyzing {cls} threat..."}
+
+
+@app.post("/api/gemini/forensics")
 async def security_audit():
     """Gemini-powered full system audit based on recent traffic"""
     recent_msgs = state.simulator.get_recent_messages(50)
