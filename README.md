@@ -91,7 +91,7 @@ python -m http.server 3000
 2. Monitor real-time traffic in the **Traffic Timeline** tab
 3. View ECU network topology in the **Network Topology** tab
 4. Select an attack type and click **🚀 LAUNCH ATTACK** to simulate threats
-5. Watch the AI engine detect and classify threats in real-time
+5. Watch the **AI engine** detect and classify threats in real-time
 6. Review detailed threat intelligence in the **Threat Analysis** tab
 
 ## 🛡️ Attack Types Detected
